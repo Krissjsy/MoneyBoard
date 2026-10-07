@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+backend/**/bin/
+backend/**/obj/
+backend/**/appsettings.Development.json
+.tools/
+backend/**/.dotnet-home/
+backend/**/.appdata/
+server/**/obj/
+server/**/bin/
