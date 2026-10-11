@@ -64,6 +64,10 @@ export type LoginResult = { accessToken: string; expiresAt: string; user: User }
 
 const apiOrigin = 'http://localhost:5080/api'
 
+export class ApiRequestError extends Error {
+  constructor(message: string, readonly status?: number) { super(message); this.name = 'ApiRequestError' }
+}
+
 export async function request<T>(path: string, token?: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
@@ -72,12 +76,13 @@ export async function request<T>(path: string, token?: string, init: RequestInit
   try {
     response = await fetch(`${apiOrigin}${path}`, { ...init, headers })
   } catch {
-    throw new Error('MoneyBoard could not reach the API. Check that the local API is running on port 5080.')
+    throw new ApiRequestError('Unable to connect. Please try again.')
   }
   if (!response.ok) {
-    const body = await response.json().catch(() => null) as { error?: string; title?: string; errors?: Record<string, string[]> } | null
+    if (response.status === 401) throw new ApiRequestError('Authentication failed.', 401)
+    const body = await response.json().catch(() => null) as { error?: string; detail?: string; title?: string; errors?: Record<string, string[]> } | null
     const fieldError = body?.errors ? Object.values(body.errors).flat()[0] : undefined
-    throw new Error(fieldError || body?.error || body?.title || `Request failed (${response.status}).`)
+    throw new ApiRequestError(fieldError || body?.error || body?.title || 'Something went wrong. Please try again.', response.status)
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
@@ -86,6 +91,8 @@ export async function request<T>(path: string, token?: string, init: RequestInit
 export const moneyApi = {
   login: (email: string, password: string) => request<LoginResult>('/auth/login', undefined, { method: 'POST', body: JSON.stringify({ email, password }) }),
   register: (name: string, email: string, password: string) => request<unknown>('/auth/register', undefined, { method: 'POST', body: JSON.stringify({ name, email, password }) }),
+  forgotPassword: (email: string) => request<{ message: string }>('/auth/forgot-password', undefined, { method: 'POST', body: JSON.stringify({ email }) }),
+  resetPassword: (email: string, token: string, newPassword: string) => request<{ message: string }>('/auth/reset-password', undefined, { method: 'POST', body: JSON.stringify({ email, token, newPassword }) }),
   me: (token: string) => request<User>('/auth/me', token),
   dashboard: (token: string, period: string) => request<Dashboard>(`/dashboard?year=${period.slice(0, 4)}&month=${Number(period.slice(5, 7))}`, token),
   transactions: (token: string) => request<Transaction[]>('/transactions', token),

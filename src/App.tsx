@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
-import { ArrowDownLeft, ArrowLeftRight, ArrowRight, ArrowUpRight, Bell, CalendarDays, ChevronDown, CircleHelp, CreditCard, Ellipsis, House, Leaf, LogOut, Plus, Search, Sparkles, Target, Wallet, X } from 'lucide-react'
-import { moneyApi, type Budget, type Dashboard, type Debt, type DebtPayment, type SavingsGoal, type Transaction, type TransactionType, type User } from './api'
+import { ArrowDownLeft, ArrowLeftRight, ArrowRight, ArrowUpRight, Bell, CalendarDays, ChevronDown, CircleHelp, CreditCard, Ellipsis, Eye, EyeOff, House, Leaf, LogOut, Plus, Search, Sparkles, Target, Wallet, X } from 'lucide-react'
+import { ApiRequestError, moneyApi, type Budget, type Dashboard, type Debt, type DebtPayment, type SavingsGoal, type Transaction, type TransactionType, type User } from './api'
 
 const currency = (amount: number) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(amount)
 const today = () => new Date().toISOString().slice(0, 10)
@@ -10,7 +10,7 @@ const prettyDate = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateSt
 const categories = ['Food', 'Housing', 'Transport', 'Utilities', 'Shopping', 'Entertainment', 'Subscriptions', 'Health', 'Travel', 'Other']
 const blankTransaction = () => ({ type: 'expense' as TransactionType, title: '', amount: '', date: today(), category: 'Food', notes: '' })
 
-function App() {
+function DashboardApp() {
   const [tab, setTab] = useState('Overview')
   const [token, setToken] = useState(() => localStorage.getItem('moneyboard.accessToken') ?? '')
   const [user, setUser] = useState<User | null>(null)
@@ -94,7 +94,11 @@ function App() {
       if (authMode === 'register') await moneyApi.register(authForm.name.trim(), authForm.email.trim(), authForm.password)
       const result = await moneyApi.login(authForm.email.trim(), authForm.password)
       localStorage.setItem('moneyboard.accessToken', result.accessToken); setUser(result.user); setToken(result.accessToken)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not sign in.') }
+    } catch (reason) {
+      setError(reason instanceof ApiRequestError && reason.status === 401
+        ? 'Incorrect email or password. Please try again or reset your password.'
+        : reason instanceof Error ? reason.message : 'Unable to connect. Please try again.')
+    }
     finally { setSaving(false) }
   }
 
@@ -153,7 +157,7 @@ function App() {
 
   const nav = [{ name: 'Overview', icon: House }, { name: 'Transactions', icon: ArrowLeftRight }, { name: 'Budgets', icon: Wallet }, { name: 'Savings goals', icon: Target }, { name: 'Payments', icon: CreditCard }]
 
-  if (!token) return <div className="auth-shell"><a className="brand" href="#"><span className="brand-icon"><Wallet size={19}/></span><span>moneyboard<span className="brand-period">.</span></span></a><form className="auth-card" onSubmit={submitAuth}><span className="eyebrow"><Sparkles size={14}/> YOUR FINANCIAL SPACE</span><h1>{authMode === 'login' ? 'Welcome back' : 'Create your account'}</h1><p className="subtitle">{authMode === 'login' ? 'Sign in to see your money clearly.' : 'Start with your real income, spending and goals.'}</p>{authMode === 'register' && <label>Your name<input value={authForm.name} onChange={e => setAuthForm({ ...authForm, name: e.target.value })} required maxLength={100}/></label>}<label>Email<input type="email" autoComplete="email" value={authForm.email} onChange={e => setAuthForm({ ...authForm, email: e.target.value })} required/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} value={authForm.password} onChange={e => setAuthForm({ ...authForm, password: e.target.value })} minLength={authMode === 'register' ? 10 : undefined} required/></label>{authMode === 'register' && <p className="form-hint">Use at least 10 characters, including a number and symbol.</p>}{error && <div className="error-message" role="alert">{error}</div>}<button className="primary-button auth-submit" disabled={saving}>{saving ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Create account'} <ArrowRight size={16}/></button><button className="text-link auth-switch" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setError('') }}>{authMode === 'login' ? 'New to MoneyBoard? Create an account' : 'Already have an account? Sign in'}</button></form></div>
+  if (!token) return <div className="auth-shell"><a className="brand" href="/"><span className="brand-icon"><Wallet size={19}/></span><span>moneyboard<span className="brand-period">.</span></span></a><form className="auth-card" onSubmit={submitAuth}><span className="eyebrow"><Sparkles size={14}/> YOUR FINANCIAL SPACE</span><h1>{authMode === 'login' ? 'Welcome back' : 'Create your account'}</h1><p className="subtitle">{authMode === 'login' ? 'Sign in to see your money clearly.' : 'Start with your real income, spending and goals.'}</p>{authMode === 'register' && <label>Your name<input value={authForm.name} onChange={e => setAuthForm({ ...authForm, name: e.target.value })} required maxLength={100}/></label>}<label>Email<input type="email" autoComplete="email" value={authForm.email} onChange={e => setAuthForm({ ...authForm, email: e.target.value })} required/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} value={authForm.password} onChange={e => setAuthForm({ ...authForm, password: e.target.value })} minLength={authMode === 'register' ? 10 : undefined} required/></label>{authMode === 'register' && <p className="form-hint">Use at least 10 characters, with uppercase and lowercase letters, a number and a symbol.</p>}{authMode === 'login' && <a className="text-link forgot-link" href="/forgot-password">Forgot password?</a>}{error && <div className="error-message" role="alert">{error}</div>}<button className="primary-button auth-submit" disabled={saving}>{saving ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Create account'} <ArrowRight size={16}/></button><button className="text-link auth-switch" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setError('') }}>{authMode === 'login' ? 'New to MoneyBoard? Create an account' : 'Already have an account? Sign in'}</button></form></div>
 
   const totalBudget = budgets.reduce((sum, budget) => sum + budget.limit, 0)
   const actualBudget = budgets.reduce((sum, budget) => sum + budget.actual, 0)
@@ -195,5 +199,85 @@ function TransactionRow({ tx, onEdit, onDelete }: { tx: Transaction; onEdit: () 
 }
 
 function EmptyState({ text }: { text: string }) { return <div className="empty-state"><span className="goal-icon"><Wallet size={18}/></span><p>{text}</p></div> }
+
+function RecoveryShell({ children }: { children: React.ReactNode }) {
+  return <div className="auth-shell"><a className="brand" href="/"><span className="brand-icon"><Wallet size={19}/></span><span>moneyboard<span className="brand-period">.</span></span></a>{children}</div>
+}
+
+function ForgotPasswordPage() {
+  const [email, setEmail] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [sent, setSent] = useState(false)
+  const [error, setError] = useState('')
+  async function submit(event: React.FormEvent) {
+    event.preventDefault(); setSaving(true); setError('')
+    try { await moneyApi.forgotPassword(email.trim()); setSent(true) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to connect. Please try again.') }
+    finally { setSaving(false) }
+  }
+  return <RecoveryShell><form className="auth-card" onSubmit={submit}>
+    <span className="eyebrow">ACCOUNT RECOVERY</span><h1>Forgot your password?</h1>
+    {sent ? <><p className="subtitle" role="status">If an account exists for this email address, you will receive instructions to reset your password.</p><a className="primary-button auth-submit recovery-button" href="/">Return to sign in <ArrowRight size={16}/></a></> : <>
+      <p className="subtitle">Enter your email address and we’ll send instructions to reset your password.</p>
+      <label htmlFor="recovery-email">Email<input id="recovery-email" type="email" autoComplete="email" maxLength={254} value={email} onChange={e => setEmail(e.target.value)} required/></label>
+      {error && <div className="error-message" role="alert">{error}</div>}
+      <button className="primary-button auth-submit" disabled={saving}>{saving ? 'Sending…' : 'Send reset link'} <ArrowRight size={16}/></button>
+    </>}
+    <a className="text-link auth-switch" href="/">Return to sign in</a>
+  </form></RecoveryShell>
+}
+
+function ResetPasswordPage() {
+  const resetDetails = useRef<{ email: string; token: string } | null>(null)
+  const [linkReady, setLinkReady] = useState(false)
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [complete, setComplete] = useState(false)
+  const [error, setError] = useState('')
+
+  useLayoutEffect(() => {
+    if (!resetDetails.current) {
+      const params = new URLSearchParams(window.location.search)
+      resetDetails.current = { email: params.get('email') ?? '', token: params.get('token') ?? '' }
+      window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.hash}`)
+    }
+    if (!resetDetails.current.email || !resetDetails.current.token)
+      setError('This reset link is invalid or incomplete. Request a new one.')
+    setLinkReady(true)
+  }, [])
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault(); setError('')
+    const details = resetDetails.current
+    if (!details?.email || !details.token) { setError('This reset link is invalid or incomplete. Request a new one.'); return }
+    if (password !== confirm) { setError('Your passwords do not match.'); return }
+    if (password.length < 10 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password) || !/[^a-zA-Z0-9]/.test(password)) { setError('Use at least 10 characters, with uppercase and lowercase letters, a number and a symbol.'); return }
+    setSaving(true)
+    try { await moneyApi.resetPassword(details.email, details.token, password); details.token = ''; setComplete(true) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'This reset link is invalid or has expired. Request a new one.') }
+    finally { setSaving(false) }
+  }
+  return <RecoveryShell><form className="auth-card" onSubmit={submit}>
+    <span className="eyebrow">ACCOUNT RECOVERY</span><h1>Set a new password</h1>
+    {complete ? <><p className="subtitle" role="status">Your password has been reset. You can now sign in with your new password.</p><a className="primary-button auth-submit recovery-button" href="/">Return to sign in <ArrowRight size={16}/></a></> : <>
+      <p className="subtitle">Choose a new password for your account.</p>
+      <label htmlFor="new-password">New password<div className="password-control"><input id="new-password" type={showPassword ? 'text' : 'password'} autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} minLength={10} required/><button type="button" aria-label={showPassword ? 'Hide new password' : 'Show new password'} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff size={16}/> : <Eye size={16}/>}</button></div></label>
+      <p className="form-hint">Use at least 10 characters, with uppercase and lowercase letters, a number and a symbol.</p>
+      <label htmlFor="confirm-password">Confirm password<div className="password-control"><input id="confirm-password" type={showConfirm ? 'text' : 'password'} autoComplete="new-password" value={confirm} onChange={e => setConfirm(e.target.value)} minLength={10} required/><button type="button" aria-label={showConfirm ? 'Hide confirmation' : 'Show confirmation'} onClick={() => setShowConfirm(!showConfirm)}>{showConfirm ? <EyeOff size={16}/> : <Eye size={16}/>}</button></div></label>
+      {error && <div className="error-message" role="alert">{error}</div>}
+      <button className="primary-button auth-submit" disabled={saving || !linkReady || !resetDetails.current?.email || !resetDetails.current.token}>{saving ? 'Saving…' : 'Reset password'} <ArrowRight size={16}/></button>
+    </>}
+    <a className="text-link auth-switch" href="/">Return to sign in</a>
+  </form></RecoveryShell>
+}
+
+function App() {
+  if (window.location.pathname === '/forgot-password') return <ForgotPasswordPage />
+  if (window.location.pathname === '/reset-password') return <ResetPasswordPage />
+  return <DashboardApp />
+}
 
 export default App
