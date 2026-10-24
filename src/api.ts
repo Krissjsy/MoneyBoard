@@ -59,7 +59,8 @@ export type Dashboard = {
   recent: Transaction[]
 }
 
-export type User = { id: string; email: string; displayName: string; currency: string }
+export type User = { id: string; email: string; displayName: string; currency: string; setupCompleted: boolean; setupProgress: string | null; setupData: string | null; hasFinancialRecords: boolean }
+export type SetupDraft = { currency: string; incomes: { name: string; amount: string; frequency: string }[]; expenses: { name: string; amount: string }[]; goals: { name: string; targetAmount: string; monthlyContribution: string; targetDate: string }[] }
 export type LoginResult = { accessToken: string; expiresAt: string; user: User }
 
 const apiOrigin = 'http://localhost:5080/api'
@@ -94,6 +95,8 @@ export const moneyApi = {
   forgotPassword: (email: string) => request<{ message: string }>('/auth/forgot-password', undefined, { method: 'POST', body: JSON.stringify({ email }) }),
   resetPassword: (email: string, token: string, newPassword: string) => request<{ message: string }>('/auth/reset-password', undefined, { method: 'POST', body: JSON.stringify({ email, token, newPassword }) }),
   me: (token: string) => request<User>('/auth/me', token),
+  saveSetupProgress: (token: string, step: number, data: SetupDraft) => request<{ saved: boolean }>('/setup/progress', token, { method: 'PUT', body: JSON.stringify({ step, data }) }),
+  completeSetup: (token: string, data: SetupDraft, period: string) => request<{ completed: boolean }>('/setup/complete', token, { method: 'POST', body: JSON.stringify({ currency: data.currency, incomes: data.incomes.filter(x => x.name.trim() && Number(x.amount) > 0).map(x => ({ name: x.name.trim(), amount: Number(x.amount), frequency: x.frequency })), expenses: data.expenses.filter(x => x.name.trim() && Number(x.amount) > 0).map(x => ({ name: x.name.trim(), amount: Number(x.amount) })), goals: data.goals.filter(x => x.name.trim() && Number(x.targetAmount) > 0).map(x => ({ name: x.name.trim(), targetAmount: Number(x.targetAmount), monthlyContribution: Number(x.monthlyContribution) || 0, targetDate: x.targetDate || null })), year: Number(period.slice(0, 4)), month: Number(period.slice(5, 7)) }) }),
   dashboard: (token: string, period: string) => request<Dashboard>(`/dashboard?year=${period.slice(0, 4)}&month=${Number(period.slice(5, 7))}`, token),
   transactions: (token: string) => request<Transaction[]>('/transactions', token),
   saveTransaction: (token: string, data: Omit<Transaction, 'id' | 'createdAt'>, existing?: Transaction) => request<Transaction>(existing ? `/transactions/${existing.type}/${existing.id}` : '/transactions', token, { method: existing ? 'PUT' : 'POST', body: JSON.stringify({ ...data, type: existing?.type ?? data.type }) }),

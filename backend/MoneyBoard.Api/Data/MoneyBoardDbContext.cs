@@ -22,6 +22,9 @@ public sealed class MoneyBoardDbContext(DbContextOptions<MoneyBoardDbContext> op
         base.OnModelCreating(b);
         b.Entity<MoneyBoardUser>().Property(x => x.DisplayName).HasMaxLength(100);
         b.Entity<MoneyBoardUser>().Property(x => x.Currency).HasMaxLength(3).HasDefaultValue("GBP");
+        b.Entity<MoneyBoardUser>().Property(x => x.SetupProgress);
+        b.Entity<MoneyBoardUser>().Property(x => x.SetupData);
+        b.Entity<MoneyBoardUser>().HasIndex(x => x.NormalizedEmail).HasDatabaseName("EmailIndex").IsUnique().HasFilter("[NormalizedEmail] IS NOT NULL");
         b.Entity<Income>().Property(x => x.Amount).HasPrecision(12, 2); b.Entity<Income>().Property(x => x.Source).HasMaxLength(100);
         b.Entity<Expense>().Property(x => x.Amount).HasPrecision(12, 2); b.Entity<Expense>().Property(x => x.Description).HasMaxLength(160);
         b.Entity<ExpenseCategory>().Property(x => x.Name).HasMaxLength(60);

@@ -2,8 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
 import { ArrowDownLeft, ArrowLeftRight, ArrowRight, ArrowUpRight, Bell, CalendarDays, ChevronDown, CircleHelp, CreditCard, Ellipsis, Eye, EyeOff, House, Leaf, LogOut, Plus, Search, Sparkles, Target, Wallet, X } from 'lucide-react'
 import { ApiRequestError, moneyApi, type Budget, type Dashboard, type Debt, type DebtPayment, type SavingsGoal, type Transaction, type TransactionType, type User } from './api'
+import Onboarding from './Onboarding'
+import { shouldOfferOnboarding } from './onboardingPolicy'
 
-const currency = (amount: number) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(amount)
+let activeCurrency = 'GBP'
+const currency = (amount: number) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: activeCurrency }).format(amount)
 const today = () => new Date().toISOString().slice(0, 10)
 const currentPeriod = () => new Date().toISOString().slice(0, 7)
 const prettyDate = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
@@ -14,6 +17,7 @@ function DashboardApp() {
   const [tab, setTab] = useState('Overview')
   const [token, setToken] = useState(() => localStorage.getItem('moneyboard.accessToken') ?? '')
   const [user, setUser] = useState<User | null>(null)
+  const [showSetup, setShowSetup] = useState(false)
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [authForm, setAuthForm] = useState({ name: '', email: '', password: '' })
   const [period, setPeriod] = useState(currentPeriod())
@@ -48,6 +52,12 @@ function DashboardApp() {
     return new Date(year, month - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })
   }, [period])
 
+  const renderTrendBars = (metric: 'income' | 'expenses') => {
+    const values = dashboard?.trend ?? []
+    const maximum = Math.max(0, ...values.map(item => item[metric]))
+    return values.map((item, index) => <i key={`${item.month}-${index}`} style={{ height: `${maximum ? Math.max(2, item[metric] / maximum * 17) : 2}px` }} />)
+  }
+
   const loadData = useCallback(async () => {
     const [summary, items, budgetRows, goalRows, debtRows] = await Promise.all([
       moneyApi.dashboard(token, period), moneyApi.transactions(token), moneyApi.budgets(token, period), moneyApi.goals(token), moneyApi.debts(token),
@@ -62,7 +72,10 @@ function DashboardApp() {
     Promise.all([moneyApi.me(token), moneyApi.dashboard(token, period), moneyApi.transactions(token), moneyApi.budgets(token, period), moneyApi.goals(token), moneyApi.debts(token)])
       .then(([profile, summary, items, budgetRows, goalRows, debtRows]) => {
         if (!active) return
+        activeCurrency = profile.currency || 'GBP'
         setUser(profile); setDashboard(summary); setTransactions(items); setBudgets(budgetRows); setGoals(goalRows); setDebts(debtRows)
+        const skipped = localStorage.getItem(`moneyboard.setupSkipped.${profile.id}`) === 'true'
+        if (shouldOfferOnboarding(profile, skipped)) setShowSetup(true)
       })
       .catch(reason => {
         if (!active) return
@@ -159,6 +172,8 @@ function DashboardApp() {
 
   if (!token) return <div className="auth-shell"><a className="brand" href="/"><span className="brand-icon"><Wallet size={19}/></span><span>moneyboard<span className="brand-period">.</span></span></a><form className="auth-card" onSubmit={submitAuth}><span className="eyebrow"><Sparkles size={14}/> YOUR FINANCIAL SPACE</span><h1>{authMode === 'login' ? 'Welcome back' : 'Create your account'}</h1><p className="subtitle">{authMode === 'login' ? 'Sign in to see your money clearly.' : 'Start with your real income, spending and goals.'}</p>{authMode === 'register' && <label>Your name<input value={authForm.name} onChange={e => setAuthForm({ ...authForm, name: e.target.value })} required maxLength={100}/></label>}<label>Email<input type="email" autoComplete="email" value={authForm.email} onChange={e => setAuthForm({ ...authForm, email: e.target.value })} required/></label><label>Password<input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} value={authForm.password} onChange={e => setAuthForm({ ...authForm, password: e.target.value })} minLength={authMode === 'register' ? 10 : undefined} required/></label>{authMode === 'register' && <p className="form-hint">Use at least 10 characters, with uppercase and lowercase letters, a number and a symbol.</p>}{authMode === 'login' && <a className="text-link forgot-link" href="/forgot-password">Forgot password?</a>}{error && <div className="error-message" role="alert">{error}</div>}<button className="primary-button auth-submit" disabled={saving}>{saving ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Create account'} <ArrowRight size={16}/></button><button className="text-link auth-switch" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setError('') }}>{authMode === 'login' ? 'New to MoneyBoard? Create an account' : 'Already have an account? Sign in'}</button></form></div>
 
+  if (showSetup && user) return <Onboarding token={token} user={user} onCancel={() => setShowSetup(false)} onSkip={() => { localStorage.setItem(`moneyboard.setupSkipped.${user.id}`, 'true'); setShowSetup(false) }} onComplete={async () => { const profile = await moneyApi.me(token); activeCurrency = profile.currency || 'GBP'; setUser(profile); await loadData(); setShowSetup(false); announce('Your financial setup is ready') }} />
+
   const totalBudget = budgets.reduce((sum, budget) => sum + budget.limit, 0)
   const actualBudget = budgets.reduce((sum, budget) => sum + budget.actual, 0)
   const budgetRemaining = totalBudget - actualBudget
@@ -168,15 +183,15 @@ function DashboardApp() {
     <aside className="sidebar"><a className="brand" href="#"><span className="brand-icon"><Wallet size={19}/></span><span>moneyboard<span className="brand-period">.</span></span></a>
       <div className="space-label">YOUR MONEY</div><nav>{nav.map(({ name, icon: Icon }) => <button key={name} className={`nav-item ${tab === name ? 'active' : ''}`} onClick={() => setTab(name)}><Icon size={18}/><span>{name}</span>{name === 'Payments' && debts.length > 0 && <i className="nav-dot"/>}</button>)}</nav>
       <button className="budget-teaser" onClick={() => setTab('Budgets')}><span className="teaser-heading">{monthLabel} budget <Ellipsis size={17}/></span><strong>{currency(actualBudget)} <small>of {currency(totalBudget)}</small></strong><span className="progress"><i style={{ width: `${budgetPercent}%` }}/></span><span className="teaser-foot">{currency(budgetRemaining)} {budgetRemaining >= 0 ? 'left to spend' : 'over budget'}</span></button>
-      <div className="sidebar-bottom"><button className="nav-item" onClick={() => announce('Use the sections to manage your money.') }><CircleHelp size={18}/><span>Help & support</span></button><button className="profile" onClick={signOut}><span className="avatar">{user?.displayName?.slice(0, 1).toUpperCase() ?? 'M'}</span><span className="profile-name"><b>{user?.displayName}</b><small>{user?.email}</small></span><LogOut size={15}/></button></div>
+      <div className="sidebar-bottom"><button className="nav-item" onClick={() => setShowSetup(true)}><Wallet size={18}/><span>Financial setup</span></button><button className="nav-item" onClick={() => announce('Use the sections to manage your money.') }><CircleHelp size={18}/><span>Help & support</span></button><button className="profile" onClick={signOut}><span className="avatar">{user?.displayName?.slice(0, 1).toUpperCase() ?? 'M'}</span><span className="profile-name"><b>{user?.displayName}</b><small>{user?.email}</small></span><LogOut size={15}/></button></div>
     </aside>
     <main className="main-area"><header className="topbar"><div className="breadcrumb">My space <span>/</span> <b>{tab}</b></div><div className="top-actions"><button className="icon-button search-button" aria-label="Search"><Search size={19}/></button><button className="icon-button bell-button" aria-label="Notifications" onClick={() => announce('You’re all caught up')}><Bell size={19}/></button><span className="top-divider"/><label className="period-picker"><CalendarDays size={14}/><input aria-label="Dashboard month" type="month" value={period} onChange={e => setPeriod(e.target.value)}/></label></div></header>
       <div className="page-content"><div className="greeting-row"><div><span className="eyebrow"><Sparkles size={14}/> YOUR FINANCIAL SNAPSHOT</span><h1>{tab === 'Overview' ? `Good to see you, ${user?.displayName?.split(' ')[0] ?? 'there'}` : tab} <span>✳</span></h1><p className="subtitle">{tab === 'Overview' ? `Here’s how your money is looking in ${monthLabel}.` : `Your ${tab.toLowerCase()} in one place.`}</p></div><button className="primary-button" onClick={() => openTransaction()}><Plus size={18}/> Add transaction</button></div>
         {error && <div className="error-banner" role="alert"><span>{error}</span><button className="text-link" onClick={() => setError('')} aria-label="Dismiss error"><X size={15}/></button></div>}
         {loading ? <div className="loading-state"><span className="spinner"/>Loading your MoneyBoard…</div> : tab === 'Overview' && dashboard ? <>
           <section className="summary-grid"><article className="summary-card balance-card"><div className="card-label">Total balance <span className="info-pill" title="All time income minus expenses">i</span></div><div className="balance-number">{currency(dashboard.balance)}</div><div className="balance-foot"><span className="trend-pill"><ArrowUpRight size={14}/> All time</span><span>income less spending</span></div><div className="balance-mark"><Wallet size={84}/></div></article>
-            <article className="summary-card"><div className="card-label">Money in <span className="tiny-icon green"><ArrowDownLeft size={15}/></span></div><div className="summary-number">{currency(dashboard.income)}</div><div className="summary-foot"><span className="summary-note">{monthLabel}</span><span className="mini-bars income-bars"><i/><i/><i/><i/><i/><i/><i/></span></div></article>
-            <article className="summary-card"><div className="card-label">Money out <span className="tiny-icon pink"><ArrowUpRight size={15}/></span></div><div className="summary-number">{currency(dashboard.expenses)}</div><div className="summary-foot"><span className="summary-note">{monthLabel}</span><span className="mini-bars expense-bars"><i/><i/><i/><i/><i/><i/><i/></span></div></article>
+            <article className="summary-card"><div className="card-label">Money in <span className="tiny-icon green"><ArrowDownLeft size={15}/></span></div><div className="summary-number">{currency(dashboard.income)}</div><div className="summary-foot"><span className="summary-note">{monthLabel}</span><span className="mini-bars income-bars" aria-hidden="true">{renderTrendBars('income')}</span></div></article>
+            <article className="summary-card"><div className="card-label">Money out <span className="tiny-icon pink"><ArrowUpRight size={15}/></span></div><div className="summary-number">{currency(dashboard.expenses)}</div><div className="summary-foot"><span className="summary-note">{monthLabel}</span><span className="mini-bars expense-bars" aria-hidden="true">{renderTrendBars('expenses')}</span></div></article>
             <article className="summary-card"><div className="card-label">Set aside <span className="tiny-icon lilac"><Target size={15}/></span></div><div className="summary-number">{currency(dashboard.saved)}</div><div className="summary-foot"><span className="summary-note">Across {goals.length} goals</span><button className="text-link" onClick={() => setTab('Savings goals')}>View goals <ArrowRight size={14}/></button></div></article></section>
           <section className="middle-grid"><article className="panel spending-panel"><div className="panel-heading"><div><h2>Your spending</h2><p>Income and expenses from your transactions.</p></div><span className="select-button">Last 6 months <ChevronDown size={15}/></span></div><div className="chart-legend"><i/> Actual spending <span><b>{currency(dashboard.expenses)}</b> this month</span></div><div className="chart"><ResponsiveContainer width="100%" height="100%"><AreaChart data={dashboard.trend} margin={{ top: 10, right: 8, left: -24, bottom: 0 }}><defs><linearGradient id="spendFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#75b89e" stopOpacity={0.2}/><stop offset="95%" stopColor="#75b89e" stopOpacity={0}/></linearGradient></defs><CartesianGrid vertical={false} stroke="#eef0ed" strokeDasharray="3 4"/><XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#a1a8a1', fontSize: 12 }} dy={11}/><Tooltip formatter={(value) => currency(Number(value))} contentStyle={{ border: '1px solid #e9ece8', borderRadius: 12, fontSize: 12, boxShadow: '0 5px 18px #19221a12' }}/><Area type="monotone" dataKey="expenses" name="Spent" stroke="#569c7d" strokeWidth={2.5} fill="url(#spendFill)" dot={false} activeDot={{ r: 5, fill: '#fff', stroke: '#569c7d', strokeWidth: 2 }}/></AreaChart></ResponsiveContainer></div></article>
             <article className="panel budget-panel"><div className="panel-heading"><div><h2>Spending plan</h2><p>{monthLabel}</p></div><button className="more-button" onClick={() => setTab('Budgets')} aria-label="Manage budgets"><Ellipsis size={20}/></button></div><div className="budget-total"><b>{currency(actualBudget)}</b><span>of {currency(totalBudget)}</span></div><div className="budget-progress"><i style={{ width: `${budgetPercent}%`, background: budgetRemaining < 0 ? '#ce927d' : '#75af90' }}/></div><div className="budget-left"><span><b>{currency(Math.abs(budgetRemaining))}</b> {budgetRemaining >= 0 ? 'left this month' : 'over budget'}</span><span>{Math.round(totalBudget ? actualBudget / totalBudget * 100 : 0)}%</span></div><div className="budget-categories">{budgets.slice(0, 3).map((budget, i) => <div className="budget-category" key={budget.id}><i className={`category-dot ${['dot-food', 'dot-home', 'dot-life'][i % 3]}`}/><span>{budget.name}</span><b>{currency(budget.actual)} <small>/ {currency(budget.limit)}</small></b><span className="cat-progress"><i style={{ width: `${Math.min(100, budget.percentUsed)}%`, background: ['#80bca2', '#b4a8dc', '#e7af86'][i % 3] }}/></span></div>)}{budgets.length === 0 && <p className="empty-inline">No budgets for this month yet.</p>}</div><button className="all-budgets" onClick={() => setTab('Budgets')}>See your full plan <ArrowRight size={15}/></button></article></section>
@@ -217,7 +232,7 @@ function ForgotPasswordPage() {
   }
   return <RecoveryShell><form className="auth-card" onSubmit={submit}>
     <span className="eyebrow">ACCOUNT RECOVERY</span><h1>Forgot your password?</h1>
-    {sent ? <><p className="subtitle" role="status">If an account exists for this email address, you will receive instructions to reset your password.</p><a className="primary-button auth-submit recovery-button" href="/">Return to sign in <ArrowRight size={16}/></a></> : <>
+    {sent ? <><p className="subtitle" role="status">If an account exists and email delivery is available, reset instructions will be sent. Check your spam folder; if no email arrives, try again later.</p><a className="primary-button auth-submit recovery-button" href="/">Return to sign in <ArrowRight size={16}/></a></> : <>
       <p className="subtitle">Enter your email address and we’ll send instructions to reset your password.</p>
       <label htmlFor="recovery-email">Email<input id="recovery-email" type="email" autoComplete="email" maxLength={254} value={email} onChange={e => setEmail(e.target.value)} required/></label>
       {error && <div className="error-message" role="alert">{error}</div>}

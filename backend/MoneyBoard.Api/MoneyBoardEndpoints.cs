@@ -15,6 +15,8 @@ public static class MoneyBoardEndpoints
         var api = endpoints.MapGroup("/api").RequireAuthorization();
 
         api.MapGet("/dashboard", GetDashboard);
+        api.MapPut("/setup/progress", SaveSetupProgress);
+        api.MapPost("/setup/complete", CompleteSetup);
         api.MapGet("/transactions", GetTransactions);
         api.MapPost("/transactions", CreateTransaction);
         api.MapPut("/transactions/{type}/{id:guid}", UpdateTransaction);
@@ -43,6 +45,46 @@ public static class MoneyBoardEndpoints
 
     private static Guid UserId(ClaimsPrincipal principal) =>
         Guid.Parse(principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? principal.FindFirstValue("sub")!);
+
+    private static async Task<IResult> SaveSetupProgress(ClaimsPrincipal principal, MoneyBoardDbContext db, SetupProgressInput input)
+    {
+        if (input.Step is < 1 or > 5 || input.Data is null || System.Text.Json.JsonSerializer.Serialize(input.Data).Length > 200_000)
+            return Results.ValidationProblem(new Dictionary<string, string[]> { ["setup"] = ["The setup progress is invalid."] });
+        var user = await db.Users.SingleAsync(x => x.Id == UserId(principal));
+        if (user.SetupCompleted) return Results.Conflict(new { error = "This setup has already been completed." });
+        user.SetupProgress = System.Text.Json.JsonSerializer.Serialize(new { step = input.Step, data = input.Data });
+        await db.SaveChangesAsync();
+        return Results.Ok(new { saved = true });
+    }
+
+    private static async Task<IResult> CompleteSetup(ClaimsPrincipal principal, MoneyBoardDbContext db, SetupInput input)
+    {
+        var userId = UserId(principal);
+        var user = await db.Users.SingleAsync(x => x.Id == userId);
+        if (input.Currency is not ("GBP" or "USD" or "EUR" or "CAD" or "AUD")) return FieldError("currency", "Choose a supported currency.");
+        if (input.Year is < 2000 or > 2200 || input.Month is < 1 or > 12 || input.Incomes is null || input.Expenses is null || input.Goals is null || input.Incomes.Count > 30 || input.Expenses.Count > 60 || input.Goals.Count > 20) return FieldError("setup", "The selected month or setup entries are invalid.");
+        if (input.Incomes.Any(x => x is null || string.IsNullOrWhiteSpace(x.Name) || x.Name.Length > 100 || x.Amount <= 0 || x.Amount > MaximumAmount || !FrequencyIsValid(x.Frequency)) || input.Expenses.Any(x => x is null || string.IsNullOrWhiteSpace(x.Name) || x.Name.Length > 60 || x.Amount <= 0 || x.Amount > MaximumAmount) || input.Goals.Any(x => x is null || string.IsNullOrWhiteSpace(x.Name) || x.Name.Length > 100 || x.TargetAmount <= 0 || x.TargetAmount > MaximumAmount || x.MonthlyContribution < 0 || x.MonthlyContribution > MaximumAmount))
+            return FieldError("setup", "Enter valid names and positive amounts for income, expenses and goals.");
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        user.Currency = input.Currency;
+        user.SetupData = System.Text.Json.JsonSerializer.Serialize(input);
+        var now = DateTime.UtcNow;
+        foreach (var expense in input.Expenses)
+        {
+            if (await db.Budgets.AnyAsync(x => x.UserId == userId && x.Name == expense.Name.Trim() && x.Year == input.Year && x.Month == input.Month)) continue;
+            db.Budgets.Add(new Budget { UserId = userId, Name = expense.Name.Trim(), Limit = expense.Amount, Year = input.Year, Month = input.Month });
+        }
+        foreach (var goal in input.Goals)
+        {
+            if (await db.SavingsGoals.AnyAsync(x => x.UserId == userId && x.Name == goal.Name.Trim())) continue;
+            db.SavingsGoals.Add(new SavingsGoal { UserId = userId, Name = goal.Name.Trim(), TargetAmount = goal.TargetAmount, MonthlyContribution = goal.MonthlyContribution, TargetDate = goal.TargetDate });
+        }
+        user.SetupCompleted = true; user.SetupProgress = null;
+        await db.SaveChangesAsync(); await transaction.CommitAsync();
+        return Results.Ok(new { completed = true });
+    }
+
+    private static bool FrequencyIsValid(string frequency) => new[] { "Weekly", "Fortnightly", "Monthly", "Annually" }.Contains(frequency, StringComparer.OrdinalIgnoreCase);
 
     private static async Task<IResult> GetDashboard(ClaimsPrincipal principal, MoneyBoardDbContext db, int? year, int? month)
     {
@@ -349,6 +391,11 @@ public static class MoneyBoardEndpoints
     public sealed record TransactionInput(string Type, string Title, decimal Amount, DateOnly Date, string? Category, string? Notes);
     public sealed record TransactionView(Guid Id, string Type, string Title, decimal Amount, DateOnly Date, string Category, string? Notes, DateTime CreatedAt);
     public sealed record BudgetInput(string Name, decimal Limit, int Year, int Month);
+    public sealed record SetupProgressInput(int Step, object Data);
+    public sealed record SetupIncomeInput(string Name, decimal Amount, string Frequency);
+    public sealed record SetupExpenseInput(string Name, decimal Amount);
+    public sealed record SetupGoalInput(string Name, decimal TargetAmount, decimal MonthlyContribution, DateOnly? TargetDate);
+    public sealed record SetupInput(string Currency, int Year, int Month, List<SetupIncomeInput> Incomes, List<SetupExpenseInput> Expenses, List<SetupGoalInput> Goals);
     public sealed record BudgetView(Guid Id, string Name, decimal Limit, decimal Actual, decimal Remaining, decimal PercentUsed, int Year, int Month);
     public sealed record SavingsGoalInput(string Name, decimal TargetAmount, decimal CurrentAmount, DateOnly? TargetDate, decimal MonthlyContribution);
     public sealed record SavingsGoalView(Guid Id, string Name, decimal TargetAmount, decimal CurrentAmount, DateOnly? TargetDate, decimal MonthlyContribution, decimal PercentComplete);

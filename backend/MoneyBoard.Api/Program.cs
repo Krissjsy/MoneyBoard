@@ -53,9 +53,20 @@ auth.MapPost("/register", async (RegisterRequest input, UserManager<MoneyBoardUs
     var email = input.Email?.Trim();
     var validEmail = !string.IsNullOrWhiteSpace(email) && email.Length <= 254 && MailAddress.TryCreate(email, out var address) && address.Address == email;
     if (string.IsNullOrWhiteSpace(input.Name) || input.Name.Length > 100 || !validEmail || string.IsNullOrWhiteSpace(input.Password)) return Results.ValidationProblem(new Dictionary<string, string[]> { ["input"] = ["Name, a valid email and a password are required."] });
+    const string duplicateEmailMessage = "An account with this email address is already registered.";
+    if (await users.FindByEmailAsync(email!) is not null) return Results.Conflict(new { error = duplicateEmailMessage });
     var user = new MoneyBoardUser { Id = Guid.NewGuid(), UserName = email, Email = email, DisplayName = input.Name.Trim(), Currency = "GBP", CreatedAt = DateTime.UtcNow };
-    var result = await users.CreateAsync(user, input.Password);
-    return result.Succeeded ? Results.Created("/api/auth/me", new { user.Id, user.Email, user.DisplayName, user.Currency }) : Results.ValidationProblem(result.Errors.GroupBy(e => e.Code).ToDictionary(g => g.Key, g => g.Select(e => e.Description).ToArray()));
+    IdentityResult result;
+    try { result = await users.CreateAsync(user, input.Password); }
+    catch (DbUpdateException)
+    {
+        // A concurrent registration may pass the lookup above; the unique SQL index is the final arbiter.
+        if (await users.FindByEmailAsync(email!) is not null) return Results.Conflict(new { error = duplicateEmailMessage });
+        throw;
+    }
+    if (result.Succeeded) return Results.Created("/api/auth/me", new { user.Id, user.Email, user.DisplayName, user.Currency });
+    if (result.Errors.Any(error => error.Code is "DuplicateEmail" or "DuplicateUserName")) return Results.Conflict(new { error = duplicateEmailMessage });
+    return Results.ValidationProblem(result.Errors.GroupBy(e => e.Code).ToDictionary(g => g.Key, g => g.Select(e => e.Description).ToArray()));
 });
 auth.MapPost("/login", async (LoginRequest input, UserManager<MoneyBoardUser> users, SignInManager<MoneyBoardUser> signIn, IConfiguration config) => {
     if (string.IsNullOrWhiteSpace(input.Email) || string.IsNullOrEmpty(input.Password)) return Results.Unauthorized();
@@ -66,7 +77,7 @@ auth.MapPost("/login", async (LoginRequest input, UserManager<MoneyBoardUser> us
     var token = new JwtSecurityToken(config["Authentication:Issuer"] ?? "MoneyBoard", config["Authentication:Audience"] ?? "MoneyBoard", claims, expires: DateTime.UtcNow.AddMinutes(30), signingCredentials: credentials);
     return Results.Ok(new { accessToken = new JwtSecurityTokenHandler().WriteToken(token), expiresAt = token.ValidTo, user = new { user.Id, user.Email, user.DisplayName, user.Currency } });
 });
-auth.MapGet("/me", async (ClaimsPrincipal principal, UserManager<MoneyBoardUser> users) => { var user = await users.GetUserAsync(principal); return user is null ? Results.Unauthorized() : Results.Ok(new { user.Id, user.Email, user.DisplayName, user.Currency }); }).RequireAuthorization();
+auth.MapGet("/me", async (ClaimsPrincipal principal, UserManager<MoneyBoardUser> users, MoneyBoardDbContext db) => { var user = await users.GetUserAsync(principal); if (user is null) return Results.Unauthorized(); var hasFinancialRecords = await db.Incomes.AnyAsync(x => x.UserId == user.Id) || await db.Expenses.AnyAsync(x => x.UserId == user.Id) || await db.Budgets.AnyAsync(x => x.UserId == user.Id) || await db.SavingsGoals.AnyAsync(x => x.UserId == user.Id) || await db.Debts.AnyAsync(x => x.UserId == user.Id); return Results.Ok(new { user.Id, user.Email, user.DisplayName, user.Currency, user.SetupCompleted, user.SetupProgress, user.SetupData, hasFinancialRecords }); }).RequireAuthorization();
 auth.MapPost("/forgot-password", async (ForgotPasswordRequest input, UserManager<MoneyBoardUser> users, IResetEmailSender emailSender, IConfiguration config, IWebHostEnvironment environment, ILoggerFactory loggerFactory) => {
     if (string.IsNullOrWhiteSpace(input.Email) || input.Email.Length > 254 || !MailAddress.TryCreate(input.Email.Trim(), out _))
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["email"] = ["Enter a valid email address."] });
@@ -86,7 +97,7 @@ auth.MapPost("/forgot-password", async (ForgotPasswordRequest input, UserManager
         {
             var resetUrl = $"{baseUri.ToString().TrimEnd('/')}/reset-password?email={Uri.EscapeDataString(user.Email!)}&token={Uri.EscapeDataString(token)}";
             try { await emailSender.SendPasswordResetAsync(user.Email!, resetUrl, CancellationToken.None); }
-            catch (Exception) { loggerFactory.CreateLogger("PasswordReset").LogWarning("Password reset email delivery failed."); }
+            catch (Exception exception) { loggerFactory.CreateLogger("PasswordReset").LogWarning("Password reset email delivery failed ({FailureType}).", exception.GetType().Name); }
         }
     }
     return Results.Ok(new { message = "If an account exists for this email address, you will receive instructions to reset your password." });
@@ -101,6 +112,49 @@ auth.MapPost("/reset-password", async (ResetPasswordRequest input, UserManager<M
         ? Results.Ok(new { message = "Your password has been reset. You can now sign in." })
         : Results.BadRequest(new { error = "This reset link is invalid or has expired, or the new password does not meet the password requirements." });
 }).RequireRateLimiting("password-reset");
+// This recovery path exists only in Development and is additionally limited to loopback callers.
+// The Identity reset token stays entirely inside this handler and is never returned or logged.
+if (app.Environment.IsDevelopment())
+{
+    app.MapPost("/api/dev/auth/reset-password", async (
+        HttpContext context,
+        DevelopmentPasswordResetRequest input,
+        UserManager<MoneyBoardUser> users,
+        MoneyBoardDbContext db) =>
+    {
+        if (context.Connection.RemoteIpAddress is not { } remoteAddress || !IPAddress.IsLoopback(remoteAddress))
+            return Results.NotFound();
+
+        var email = input.Email?.Trim();
+        var confirmation = input.ConfirmEmail?.Trim();
+        if (string.IsNullOrWhiteSpace(email) || email.Length > 254 || !MailAddress.TryCreate(email, out _)
+            || !string.Equals(email, confirmation, StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrEmpty(input.NewPassword))
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["input"] = ["Enter the existing account email twice exactly and provide a new password."]
+            });
+
+        var normalizedEmail = users.NormalizeEmail(email);
+        var matches = await db.Users
+            .Where(user => user.NormalizedEmail == normalizedEmail)
+            .Take(2)
+            .ToListAsync();
+        if (matches.Count == 0)
+            return Results.NotFound(new { error = "No existing account matches that email address." });
+        if (matches.Count != 1)
+            return Results.Conflict(new { error = "More than one account matches that email. No account was changed." });
+
+        var token = await users.GeneratePasswordResetTokenAsync(matches[0]);
+        var result = await users.ResetPasswordAsync(matches[0], token, input.NewPassword);
+        if (!result.Succeeded)
+            return Results.ValidationProblem(result.Errors
+                .GroupBy(error => error.Code)
+                .ToDictionary(group => group.Key, group => group.Select(error => error.Description).ToArray()));
+
+        return Results.Ok(new { message = "Password reset. You can now sign in." });
+    }).RequireRateLimiting("password-reset");
+}
 app.MapMoneyBoardEndpoints();
 app.Run();
 
@@ -108,3 +162,6 @@ record RegisterRequest(string Name, string Email, string Password);
 record LoginRequest(string Email, string Password);
 record ForgotPasswordRequest(string Email);
 record ResetPasswordRequest(string Email, string Token, string NewPassword);
+record DevelopmentPasswordResetRequest(string? Email, string? ConfirmEmail, string? NewPassword);
+
+public partial class Program { }

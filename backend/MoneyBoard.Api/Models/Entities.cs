@@ -6,6 +6,9 @@ public sealed class MoneyBoardUser : IdentityUser<Guid>
 {
     public string DisplayName { get; set; } = "";
     public string Currency { get; set; } = "GBP";
+    public bool SetupCompleted { get; set; }
+    public string? SetupProgress { get; set; }
+    public string? SetupData { get; set; }
     public DateTime CreatedAt { get; set; }
     public ICollection<Income> Incomes { get; set; } = [];
     public ICollection<Expense> Expenses { get; set; } = [];

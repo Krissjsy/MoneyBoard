@@ -487,6 +487,15 @@ namespace MoneyBoard.Api.Data.Migrations
                     b.Property<string>("SecurityStamp")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<bool>("SetupCompleted")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("SetupData")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("SetupProgress")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<bool>("TwoFactorEnabled")
                         .HasColumnType("bit");
 
@@ -497,7 +506,9 @@ namespace MoneyBoard.Api.Data.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("NormalizedEmail")
-                        .HasDatabaseName("EmailIndex");
+                        .IsUnique()
+                        .HasDatabaseName("EmailIndex")
+                        .HasFilter("[NormalizedEmail] IS NOT NULL");
 
                     b.HasIndex("NormalizedUserName")
                         .IsUnique()

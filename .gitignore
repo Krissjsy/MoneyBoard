@@ -11,4 +11,6 @@ backend/**/appsettings.Development.json
 backend/**/.dotnet-home/
 backend/**/.appdata/
 server/**/obj/
+tests/**/bin/
+tests/**/obj/
 server/**/bin/
