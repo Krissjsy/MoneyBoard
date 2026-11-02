@@ -16,11 +16,14 @@ public sealed class SetupApiFactory : WebApplicationFactory<Program>
 {
     private readonly SqliteConnection _connection = new($"Data Source=moneyboard-test-{Guid.NewGuid():N};Mode=Memory;Cache=Shared");
     private readonly string _environment;
+    private readonly bool _useInMemory;
+    private readonly string _inMemoryDatabaseName = $"moneyboard-test-{Guid.NewGuid():N}";
     public TestSaveChangesInterceptor SaveChangesInterceptor { get; } = new();
 
-    public SetupApiFactory(string environment = "Testing")
+    public SetupApiFactory(string environment = "Testing", bool useInMemory = false)
     {
         _environment = environment;
+        _useInMemory = useInMemory;
         // Minimal hosting executes Program before ConfigureWebHost's app configuration callback.
         // These process-local values satisfy startup validation; the SQL provider is replaced below.
         Environment.SetEnvironmentVariable("ConnectionStrings__MoneyBoard", "Data Source=isolated-test-database");
@@ -51,7 +54,13 @@ public sealed class SetupApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<MoneyBoardDbContext>();
             services.AddSingleton(SaveChangesInterceptor);
             services.AddDbContext<MoneyBoardDbContext>((provider, options) =>
-                options.UseSqlite(_connection).AddInterceptors(provider.GetRequiredService<TestSaveChangesInterceptor>()));
+            {
+                if (_useInMemory)
+                    options.UseInMemoryDatabase(_inMemoryDatabaseName);
+                else
+                    options.UseSqlite(_connection);
+                options.AddInterceptors(provider.GetRequiredService<TestSaveChangesInterceptor>());
+            });
         });
     }
 

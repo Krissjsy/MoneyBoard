@@ -6,6 +6,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const isWindows = process.platform === 'win32'
 const children = []
 let stopping = false
+const appEnvironment = process.env.ASPNETCORE_ENVIRONMENT === 'E2E' && process.env.DOTNET_ENVIRONMENT === 'E2E'
+  ? 'E2E'
+  : 'Development'
 const webPort = process.env.MONEYBOARD_WEB_PORT ?? '5173'
 if (!/^\d+$/.test(webPort) || Number(webPort) < 1 || Number(webPort) > 65535) {
   throw new Error('MONEYBOARD_WEB_PORT must be a valid TCP port number.')
@@ -54,5 +57,5 @@ console.log(`Starting MoneyBoard API at http://localhost:5080 and frontend at ${
 start('api', 'dotnet', [
   'run', '--project', path.join(root, 'backend', 'MoneyBoard.Api', 'MoneyBoard.Api.csproj'),
   '--no-launch-profile', '--urls', 'http://localhost:5080',
-], { env: { ASPNETCORE_ENVIRONMENT: 'Development', DOTNET_ENVIRONMENT: 'Development', Frontend__Origin: frontendOrigin } })
+], { env: { ASPNETCORE_ENVIRONMENT: appEnvironment, DOTNET_ENVIRONMENT: appEnvironment, Frontend__Origin: frontendOrigin } })
 start('web', process.execPath, [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js'), '--host', 'localhost', '--port', webPort, '--strictPort'], { env: { MONEYBOARD_WEB_PORT: webPort } })

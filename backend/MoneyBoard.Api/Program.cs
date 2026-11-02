@@ -90,8 +90,9 @@ auth.MapPost("/forgot-password", async (ForgotPasswordRequest input, UserManager
         var validFrontendUrl = Uri.TryCreate(frontendBaseUrl, UriKind.Absolute, out var baseUri);
         var isLoopbackHost = validFrontendUrl && (string.Equals(baseUri!.Host, "localhost", StringComparison.OrdinalIgnoreCase)
             || IPAddress.TryParse(baseUri.Host, out var frontendAddress) && IPAddress.IsLoopback(frontendAddress));
+        var allowLocalResetUrl = environment.IsDevelopment() || environment.IsEnvironment("E2E") && isLoopbackHost;
         if (validFrontendUrl
-            && (environment.IsDevelopment()
+            && (allowLocalResetUrl
                 ? baseUri!.Scheme is "https" or "http"
                 : baseUri!.Scheme == "https" && !isLoopbackHost))
         {

@@ -74,6 +74,19 @@ describe('financial setup wizard', () => {
     expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/setup/complete'), expect.anything())
   })
 
+  it('loads completed setup data for review and allows completed progress to be saved', async () => {
+    const userEventInstance = userEvent.setup()
+    const fetchMock = vi.fn(async () => ok({ saved: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    const completedUser: User = { ...user, setupCompleted: true, setupData: JSON.stringify({ Currency: 'EUR', Incomes: [{ Name: 'Salary', Amount: 4000, Frequency: 'Monthly' }], Expenses: [{ Name: 'Housing', Amount: 1000 }], Goals: [] }) }
+    render(<Onboarding token="test-token" user={completedUser} onComplete={async () => {}} onSkip={() => {}} onCancel={() => {}} />)
+
+    await userEventInstance.click(screen.getByRole('button', { name: /Review my setup/i }))
+    await userEventInstance.click(screen.getByRole('button', { name: /Continue/i }))
+    expect((screen.getByLabelText('Income source') as HTMLInputElement).value).toBe('Salary')
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/setup/progress'), expect.objectContaining({ method: 'PUT' })))
+  })
+
   it('recovers from an older or incomplete saved draft instead of crashing when setup is opened', async () => {
     const userEventInstance = userEvent.setup()
     const profileWithIncompleteDraft = { ...user, setupProgress: JSON.stringify({ step: 3, data: {} }) }

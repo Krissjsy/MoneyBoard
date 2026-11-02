@@ -51,7 +51,6 @@ public static class MoneyBoardEndpoints
         if (input.Step is < 1 or > 5 || input.Data is null || System.Text.Json.JsonSerializer.Serialize(input.Data).Length > 200_000)
             return Results.ValidationProblem(new Dictionary<string, string[]> { ["setup"] = ["The setup progress is invalid."] });
         var user = await db.Users.SingleAsync(x => x.Id == UserId(principal));
-        if (user.SetupCompleted) return Results.Conflict(new { error = "This setup has already been completed." });
         user.SetupProgress = System.Text.Json.JsonSerializer.Serialize(new { step = input.Step, data = input.Data });
         await db.SaveChangesAsync();
         return Results.Ok(new { saved = true });
@@ -67,17 +66,21 @@ public static class MoneyBoardEndpoints
             return FieldError("setup", "Enter valid names and positive amounts for income, expenses and goals.");
         await using var transaction = await db.Database.BeginTransactionAsync();
         user.Currency = input.Currency;
-        user.SetupData = System.Text.Json.JsonSerializer.Serialize(input);
+        user.SetupData = System.Text.Json.JsonSerializer.Serialize(input, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
         var now = DateTime.UtcNow;
         foreach (var expense in input.Expenses)
         {
-            if (await db.Budgets.AnyAsync(x => x.UserId == userId && x.Name == expense.Name.Trim() && x.Year == input.Year && x.Month == input.Month)) continue;
-            db.Budgets.Add(new Budget { UserId = userId, Name = expense.Name.Trim(), Limit = expense.Amount, Year = input.Year, Month = input.Month });
+            var name = expense.Name.Trim();
+            var budget = await db.Budgets.SingleOrDefaultAsync(x => x.UserId == userId && x.Year == input.Year && x.Month == input.Month && x.Name.ToLower() == name.ToLower());
+            if (budget is null) db.Budgets.Add(new Budget { UserId = userId, Name = name, Limit = expense.Amount, Year = input.Year, Month = input.Month });
+            else { budget.Limit = expense.Amount; budget.UpdatedAt = now; }
         }
         foreach (var goal in input.Goals)
         {
-            if (await db.SavingsGoals.AnyAsync(x => x.UserId == userId && x.Name == goal.Name.Trim())) continue;
-            db.SavingsGoals.Add(new SavingsGoal { UserId = userId, Name = goal.Name.Trim(), TargetAmount = goal.TargetAmount, MonthlyContribution = goal.MonthlyContribution, TargetDate = goal.TargetDate });
+            var name = goal.Name.Trim();
+            var existing = await db.SavingsGoals.SingleOrDefaultAsync(x => x.UserId == userId && x.Name.ToLower() == name.ToLower());
+            if (existing is null) db.SavingsGoals.Add(new SavingsGoal { UserId = userId, Name = name, TargetAmount = goal.TargetAmount, MonthlyContribution = goal.MonthlyContribution, TargetDate = goal.TargetDate });
+            else { existing.TargetAmount = goal.TargetAmount; existing.MonthlyContribution = goal.MonthlyContribution; existing.TargetDate = goal.TargetDate; existing.UpdatedAt = now; }
         }
         user.SetupCompleted = true; user.SetupProgress = null;
         await db.SaveChangesAsync(); await transaction.CommitAsync();
@@ -103,11 +106,7 @@ public static class MoneyBoardEndpoints
         var allExpenses = await db.Expenses.AsNoTracking().Where(x => x.UserId == userId).SumAsync(x => (decimal?)x.Amount) ?? 0;
 
         var budgetRows = await db.Budgets.AsNoTracking().Where(x => x.UserId == userId && x.Year == selectedYear && x.Month == selectedMonth).ToListAsync();
-        var spendingByCategory = await db.Expenses.AsNoTracking()
-            .Where(x => x.UserId == userId && x.Date >= periodStart && x.Date < periodEnd)
-            .GroupBy(x => x.Category!.Name)
-            .Select(group => new { Category = group.Key, Amount = group.Sum(x => x.Amount) })
-            .ToDictionaryAsync(x => x.Category, x => x.Amount, StringComparer.OrdinalIgnoreCase);
+        var spendingByCategory = await GetExpenseActualsByCategory(db, userId, periodStart, periodEnd);
         var budgets = budgetRows.Select(x => ToBudgetView(x, spendingByCategory.GetValueOrDefault(x.Name))).ToArray();
 
         var goalValues = await db.SavingsGoals.AsNoTracking().Where(x => x.UserId == userId)
@@ -162,6 +161,8 @@ public static class MoneyBoardEndpoints
 
     private static async Task<IResult> UpdateTransaction(ClaimsPrincipal principal, MoneyBoardDbContext db, string type, Guid id, TransactionInput input)
     {
+        if (!type.Equals("income", StringComparison.OrdinalIgnoreCase) && !type.Equals("expense", StringComparison.OrdinalIgnoreCase)) return Results.NotFound();
+        if (!string.Equals(type, input.Type, StringComparison.OrdinalIgnoreCase)) return FieldError("type", "The transaction type in the URL must match the request body.");
         var error = ValidateTransaction(input);
         if (error is not null) return error;
         var userId = UserId(principal);
@@ -230,8 +231,7 @@ public static class MoneyBoardEndpoints
         if (selectedMonth is < 1 or > 12 || selectedYear is < 2000 or > 2200) return Results.ValidationProblem(new Dictionary<string, string[]> { ["period"] = ["Choose a valid month and year."] });
         var start = new DateOnly(selectedYear, selectedMonth, 1); var end = start.AddMonths(1);
         var rows = await db.Budgets.AsNoTracking().Where(x => x.UserId == UserId(principal) && x.Year == selectedYear && x.Month == selectedMonth).OrderBy(x => x.Name).ToListAsync();
-        var actuals = await db.Expenses.AsNoTracking().Where(x => x.UserId == UserId(principal) && x.Date >= start && x.Date < end)
-            .GroupBy(x => x.Category!.Name).Select(g => new { Name = g.Key, Amount = g.Sum(x => x.Amount) }).ToDictionaryAsync(x => x.Name, x => x.Amount, StringComparer.OrdinalIgnoreCase);
+        var actuals = await GetExpenseActualsByCategory(db, UserId(principal), start, end);
         return Results.Ok(rows.Select(x => ToBudgetView(x, actuals.GetValueOrDefault(x.Name))));
     }
 
@@ -239,10 +239,12 @@ public static class MoneyBoardEndpoints
     {
         var error = ValidateBudget(input); if (error is not null) return error;
         var userId = UserId(principal); var name = input.Name.Trim();
-        if (await db.Budgets.AnyAsync(x => x.UserId == userId && x.Year == input.Year && x.Month == input.Month && x.Name == name)) return Results.Conflict(new { error = "A budget already exists for this category and month." });
+        if (await BudgetNameExists(db, userId, input.Year, input.Month, name)) return Results.Conflict(new { error = "A budget already exists for this category and month." });
         var budget = new Budget { UserId = userId, Name = name, Limit = input.Limit, Year = input.Year, Month = input.Month };
         db.Budgets.Add(budget); await db.SaveChangesAsync();
-        return Results.Created($"/api/budgets/{budget.Id}", ToBudgetView(budget, 0));
+        var start = new DateOnly(budget.Year, budget.Month, 1); var end = start.AddMonths(1);
+        var actuals = await GetExpenseActualsByCategory(db, userId, start, end);
+        return Results.Created($"/api/budgets/{budget.Id}", ToBudgetView(budget, actuals.GetValueOrDefault(budget.Name)));
     }
 
     private static async Task<IResult> UpdateBudget(ClaimsPrincipal principal, MoneyBoardDbContext db, Guid id, BudgetInput input)
@@ -251,12 +253,12 @@ public static class MoneyBoardEndpoints
         var userId = UserId(principal); var budget = await db.Budgets.SingleOrDefaultAsync(x => x.UserId == userId && x.Id == id);
         if (budget is null) return Results.NotFound();
         var name = input.Name.Trim();
-        if (await db.Budgets.AnyAsync(x => x.UserId == userId && x.Id != id && x.Year == input.Year && x.Month == input.Month && x.Name == name)) return Results.Conflict(new { error = "A budget already exists for this category and month." });
+        if (await BudgetNameExists(db, userId, input.Year, input.Month, name, id)) return Results.Conflict(new { error = "A budget already exists for this category and month." });
         budget.Name = name; budget.Limit = input.Limit; budget.Year = input.Year; budget.Month = input.Month; budget.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
         var start = new DateOnly(budget.Year, budget.Month, 1); var end = start.AddMonths(1);
-        var actual = await db.Expenses.Where(x => x.UserId == userId && x.Category!.Name == budget.Name && x.Date >= start && x.Date < end).SumAsync(x => (decimal?)x.Amount) ?? 0;
-        return Results.Ok(ToBudgetView(budget, actual));
+        var actuals = await GetExpenseActualsByCategory(db, userId, start, end);
+        return Results.Ok(ToBudgetView(budget, actuals.GetValueOrDefault(budget.Name)));
     }
 
     private static async Task<IResult> DeleteBudget(ClaimsPrincipal principal, MoneyBoardDbContext db, Guid id)
@@ -382,6 +384,25 @@ public static class MoneyBoardEndpoints
     }
 
     private static BudgetView ToBudgetView(Budget budget, decimal actual) => new(budget.Id, budget.Name, budget.Limit, actual, budget.Limit - actual, budget.Limit == 0 ? 0 : Math.Round(actual / budget.Limit * 100, 1), budget.Year, budget.Month);
+    private static async Task<Dictionary<string, decimal>> GetExpenseActualsByCategory(MoneyBoardDbContext db, Guid userId, DateOnly start, DateOnly end)
+    {
+        var expenses = await db.Expenses.AsNoTracking()
+            .Where(x => x.UserId == userId && x.Date >= start && x.Date < end)
+            .Select(x => new { Category = x.Category!.Name, x.Amount })
+            .ToListAsync();
+        return expenses.GroupBy(x => x.Category, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Sum(x => x.Amount), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static async Task<bool> BudgetNameExists(MoneyBoardDbContext db, Guid userId, int year, int month, string name, Guid? excludedId = null)
+    {
+        var names = await db.Budgets.AsNoTracking()
+            .Where(x => x.UserId == userId && x.Year == year && x.Month == month && (excludedId == null || x.Id != excludedId))
+            .Select(x => x.Name)
+            .ToListAsync();
+        return names.Any(existing => string.Equals(existing, name, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static SavingsGoalView GoalView(SavingsGoal goal) => new(goal.Id, goal.Name, goal.TargetAmount, goal.CurrentAmount, goal.TargetDate, goal.MonthlyContribution, goal.TargetAmount == 0 ? 0 : Math.Round(goal.CurrentAmount / goal.TargetAmount * 100, 1));
     private static DebtView ToDebtView(Debt debt) => new(debt.Id, debt.Name, debt.OriginalAmount, debt.Balance, debt.InterestRate, debt.MinimumPayment, debt.Frequency, debt.NextDueDate, debt.Status, debt.Payments.OrderByDescending(x => x.Date).Select(PaymentView).ToArray());
     private static DebtPaymentView PaymentView(DebtPayment payment) => new(payment.Id, payment.DebtId, payment.Amount, payment.Date, payment.Notes);

@@ -23,6 +23,24 @@ If another application already owns port 5173, leave it running and choose an av
 
 Install JavaScript dependencies first with `npm.cmd install` if `node_modules` is absent. The API launch profile sets the Development environment so ASP.NET Core loads the project's User Secrets. Its local CORS policy allows the frontend origin `http://localhost:5173`.
 
+## End-to-end browser tests
+
+Run the Playwright suite with `npm.cmd run test:e2e`. It uses installed Google Chrome, the local SQL Server default instance (`.`) with Windows integrated authentication, and the repository-pinned `dotnet-ef` tool. Keep ports 5080, 5173, 1025, and 5081 available. The E2E runner now requires explicit database and migration settings:
+
+```powershell
+$env:MONEYBOARD_E2E_CONNECTION_STRING = 'Server=.;Database=MoneyBoard_E2E;Trusted_Connection=True;TrustServerCertificate=True;Encrypt=False;'
+$env:MONEYBOARD_E2E_ALLOW_MIGRATIONS = 'I_ALLOW_MONEYBOARD_E2E_MIGRATIONS'
+# Only when the dedicated database does not exist yet:
+$env:MONEYBOARD_E2E_ALLOW_CREATE = 'I_CREATE_MONEYBOARD_E2E'
+npm.cmd run test:e2e
+```
+
+The runner accepts only the local default instance, the exact `MoneyBoard_E2E` catalog, and Windows integrated authentication; unsupported connection properties and duplicate aliases are rejected. Before database changes it confirms the connected SQL Server reports this machine’s default instance. If the database is absent, creation requires the separate one-time setting above and writes the safety marker before migrations. If it already exists, the expected marker must be present and valid; the runner never repairs an unmarked database. The same validated connection string is passed to EF migrations and the API, overriding development configuration and user-secrets. The API runs in the dedicated `E2E` environment, so ASP.NET Core does not load Development user-secrets; the E2E environment permits password-reset links only to loopback hosts. A SQL Server application lock prevents overlapping bootstraps from other processes using that instance; the runner monitors its owning SQL session and aborts protected work if that session exits.
+
+Browser tests use the fixed frontend URL `http://localhost:5173`. The runner and Playwright reject a conflicting `MONEYBOARD_WEB_PORT` override and check that port before database access; Vite also uses strict-port mode. Ensure ports 5080, 5173, 1025, and 5081 are available before starting.
+
+The signing key is generated for each runner process. Password-reset email is captured by loopback-only SMTP and mailbox servers; accounts and financial data are synthetic. The dedicated database and test records are retained between runs. No database deletion or reset is performed. Playwright stores failure screenshots and traces under the ignored `test-results/` directory and HTML reports under `playwright-report/`.
+
 ## Configuration and architecture
 
 `backend/MoneyBoard.Api/appsettings.json` contains non-secret defaults only. Local connection strings and signing keys belong in .NET user-secrets or environment variables, never committed settings. `.env.example` documents the equivalent SQL Server environment variable names; ASP.NET Core does not load `.env` files automatically.

@@ -95,7 +95,7 @@ public sealed class SetupApiTests
     }
 
     [Fact]
-    public async Task Completion_preserves_existing_matching_budgets_and_goals()
+    public async Task Completed_setup_can_be_edited_without_losing_existing_financial_records()
     {
         using var factory = new SetupApiFactory();
         var client = await NewAuthenticatedClient(factory);
@@ -104,22 +104,40 @@ public sealed class SetupApiTests
         {
             var db = scope.ServiceProvider.GetRequiredService<MoneyBoardDbContext>();
             db.Budgets.Add(new MoneyBoard.Api.Models.Budget { UserId = userId, Name = "Housing", Limit = 1777m, Year = 2026, Month = 10 });
+            db.Budgets.Add(new MoneyBoard.Api.Models.Budget { UserId = userId, Name = "Travel", Limit = 300m, Year = 2026, Month = 9 });
             db.SavingsGoals.Add(new MoneyBoard.Api.Models.SavingsGoal { UserId = userId, Name = "Emergency fund", TargetAmount = 9000m, CurrentAmount = 125m, MonthlyContribution = 450m });
+            var category = new MoneyBoard.Api.Models.ExpenseCategory { UserId = userId, Name = "Food" };
+            db.ExpenseCategories.Add(category);
+            db.Incomes.Add(new MoneyBoard.Api.Models.Income { UserId = userId, Source = "Bonus", Amount = 100m, Date = new DateOnly(2026, 10, 1) });
+            db.Expenses.Add(new MoneyBoard.Api.Models.Expense { UserId = userId, Category = category, Description = "Lunch", Amount = 12m, Date = new DateOnly(2026, 10, 2) });
+            db.Debts.Add(new MoneyBoard.Api.Models.Debt { UserId = userId, Name = "Card", OriginalAmount = 1000m, Balance = 800m, MinimumPayment = 25m, Payments = { new MoneyBoard.Api.Models.DebtPayment { UserId = userId, Amount = 50m, Date = new DateOnly(2026, 10, 3) } } });
             await db.SaveChangesAsync();
         }
 
+        var draft = new { currency = "EUR", year = 2026, month = 10,
+            incomes = new[] { new { name = "Salary", amount = 5000m, frequency = "Monthly" } },
+            expenses = new[] { new { name = "Housing", amount = 1600m }, new { name = "Food", amount = 500m } },
+            goals = new[] { new { name = "Emergency fund", targetAmount = 12000m, monthlyContribution = 600m, targetDate = (DateOnly?)new DateOnly(2028, 1, 1) } } };
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/setup/complete", CompleteBody)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync("/api/setup/progress", new { step = 2, data = draft })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/setup/complete", draft)).StatusCode);
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<MoneyBoardDbContext>();
             var budgets = await db.Budgets.Where(x => x.UserId == userId && x.Name == "Housing").ToListAsync();
             Assert.Single(budgets);
-            Assert.Equal(1777m, budgets[0].Limit);
+            Assert.Equal(1600m, budgets[0].Limit);
             var goals = await db.SavingsGoals.Where(x => x.UserId == userId && x.Name == "Emergency fund").ToListAsync();
             Assert.Single(goals);
-            Assert.Equal(9000m, goals[0].TargetAmount);
+            Assert.Equal(12000m, goals[0].TargetAmount);
             Assert.Equal(125m, goals[0].CurrentAmount);
-            Assert.Equal(450m, goals[0].MonthlyContribution);
+            Assert.Equal(600m, goals[0].MonthlyContribution);
+            Assert.Equal("EUR", (await db.Users.SingleAsync(x => x.Id == userId)).Currency);
+            Assert.True(await db.Budgets.AnyAsync(x => x.UserId == userId && x.Name == "Travel" && x.Limit == 300m && x.Year == 2026 && x.Month == 9));
+            Assert.Equal(1, await db.Incomes.CountAsync(x => x.UserId == userId));
+            Assert.Equal(1, await db.Expenses.CountAsync(x => x.UserId == userId));
+            Assert.Equal(1, await db.Debts.CountAsync(x => x.UserId == userId));
+            Assert.Equal(1, await db.DebtPayments.CountAsync(x => x.UserId == userId));
         }
     }
 
